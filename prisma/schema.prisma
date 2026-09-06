@@ -1,0 +1,48 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model MatchPost {
+  id              String         @id @default(cuid())
+  redditId        String         @unique
+  redditTitle     String
+  cleanedTitle    String
+  homeTeam        String?
+  awayTeam        String?
+  competition     String         @default("Other Football")
+  thumbnailUrl    String?
+  permalink       String
+  selftextRaw     String
+  publishedAt     DateTime
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  links           ExtractedLink[]
+
+  @@index([competition])
+  @@index([publishedAt])
+}
+
+model ExtractedLink {
+  id              String         @id @default(cuid())
+  matchPostId     String
+  matchPost       MatchPost      @relation(fields: [matchPostId], references: [id], onDelete: Cascade)
+  
+  url             String
+  domain          String
+  displayName     String
+  category        String         @default("HIGHLIGHTS")
+  label           String?
+  isEmbeddable    Boolean        @default(false)
+  embedUrl        String?
+  
+  createdAt       DateTime       @default(now())
+
+  @@index([matchPostId])
+  @@index([category])
+}

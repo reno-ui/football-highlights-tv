@@ -1,0 +1,9 @@
+{
+  "appId": "com.footballtv.app",
+  "appName": "Football TV",
+  "webDir": "public",
+  "server": {
+    "url": "http://192.168.86.49:3000",
+    "cleartext": true
+  }
+}
