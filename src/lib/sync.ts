@@ -1,5 +1,4 @@
 import { XMLParser } from "fast-xml-parser";
-import puppeteer from "puppeteer-core";
 import he from "he";
 import { prisma } from "./db";
 import { detectCompetition } from "./leagues";
@@ -10,44 +9,12 @@ const parser = new XMLParser({
 });
 
 const SUBREDDIT_POSTS_RSS = "https://www.reddit.com/r/footballhighlights/new.rss";
-const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-
-const RSS_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "application/atom+xml,application/xml,text/xml",
+const REDDIT_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Accept": "application/json, text/xml, */*",
 };
 
-function categorizeLink(surroundingText: string): string {
-  const lower = surroundingText.toLowerCase();
-  if (
-    lower.includes("full match") ||
-    lower.includes("full game") ||
-    lower.includes("1st half") ||
-    lower.includes("2nd half") ||
-    lower.includes("first half") ||
-    lower.includes("second half")
-  ) {
-    return "FULL_MATCH";
-  }
-  if (lower.includes("extended")) {
-    return "EXTENDED_HIGHLIGHTS";
-  }
-  if (
-    lower.includes("highlight") ||
-    lower.includes("goals") ||
-    lower.includes("replay")
-  ) {
-    return "HIGHLIGHTS";
-  }
-  return "OTHER";
-}
-
-function cleanTitle(rawTitle: string): {
-  title: string;
-  homeTeam?: string;
-  awayTeam?: string;
-  competition: string;
-} {
+function cleanTitle(rawTitle: string) {
   const competition = detectCompetition(rawTitle);
   let cleaned = rawTitle.replace(/\[.*?\]|\(.*?\)/g, "").trim();
 
@@ -68,11 +35,26 @@ function cleanTitle(rawTitle: string): {
   return { title: cleaned, competition };
 }
 
+function categorizeLink(surroundingText: string): string {
+  const lower = surroundingText.toLowerCase();
+  if (
+    lower.includes("full match") ||
+    lower.includes("full game") ||
+    lower.includes("1st half") ||
+    lower.includes("first half") ||
+    lower.includes("2nd half") ||
+    lower.includes("second half")
+  ) {
+    return "FULL_MATCH";
+  }
+  return "HIGHLIGHTS";
+}
+
 function extractAllUrls(rawText: string): { url: string; domain: string; displayName: string; category: string }[] {
   if (!rawText) return [];
 
   const decoded = he.decode(rawText);
-  const urlRegex = /(?:href=["'])?(https?:\/\/[^\s"'<>)]+)/gi;
+  const urlRegex = /(?:href=["'])?(https?:\/\/[^\s"'<>]+)/gi;
   const results: { url: string; domain: string; displayName: string; category: string }[] = [];
 
   let match: RegExpExecArray | null;
@@ -113,7 +95,7 @@ function extractAllUrls(rawText: string): { url: string; domain: string; display
 
 export async function syncRedditHighlights() {
   // 1. Fetch recent match entries from RSS feed
-  const postsRes = await fetch(SUBREDDIT_POSTS_RSS, { headers: RSS_HEADERS, cache: "no-store" });
+  const postsRes = await fetch(SUBREDDIT_POSTS_RSS, { headers: REDDIT_HEADERS, cache: "no-store" });
   if (!postsRes.ok) throw new Error(`Posts RSS returned ${postsRes.status}`);
 
   const postsXml = await postsRes.text();
@@ -121,21 +103,7 @@ export async function syncRedditHighlights() {
   const postEntries = postsObj?.feed?.entry || [];
   const postList = Array.isArray(postEntries) ? postEntries : [postEntries];
 
-  // 2. Launch headless Chrome instance
-  const browser = await puppeteer.launch({
-    executablePath: CHROME_PATH,
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
-
-  const page = await browser.newPage();
-  await page.setUserAgent(
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-  );
-
   let processedCount = 0;
-
-  // Process the top 15 most recent fixtures
   const targetList = postList.slice(0, 15);
 
   for (const item of targetList) {
@@ -152,19 +120,28 @@ export async function syncRedditHighlights() {
     // Initial links from post selftext
     const foundLinks = extractAllUrls(contentHtml);
 
-    // 3. Render post in headless Chrome to grab comments
+    // Fetch comments via Reddit JSON API instead of headless browser
     if (permalink) {
       try {
-        await page.goto(permalink, { waitUntil: "domcontentloaded", timeout: 12000 });
-        const renderedHtml = await page.content();
-        const commentLinks = extractAllUrls(renderedHtml);
-        foundLinks.push(...commentLinks);
+        const jsonUrl = permalink.replace(/\/$/, "") + ".json";
+        const threadRes = await fetch(jsonUrl, { headers: REDDIT_HEADERS, cache: "no-store" });
+        if (threadRes.ok) {
+          const threadData = await threadRes.json();
+          // threadData[1] contains the comment tree
+          const comments = threadData[1]?.data?.children || [];
+          for (const c of comments) {
+            const bodyHtml = c.data?.body_html || "";
+            const body = c.data?.body || "";
+            if (bodyHtml) foundLinks.push(...extractAllUrls(bodyHtml));
+            if (body) foundLinks.push(...extractAllUrls(body));
+          }
+        }
       } catch (err) {
-        console.warn(`Headless browser render timeout on ${permalink}`);
+        console.warn(`Failed to fetch comments JSON for ${permalink}:`, err);
       }
     }
 
-    // Deduplicate
+    // Deduplicate links
     const uniqueMap = new Map<string, (typeof foundLinks)[0]>();
     for (const link of foundLinks) {
       if (!uniqueMap.has(link.url)) {
@@ -212,6 +189,5 @@ export async function syncRedditHighlights() {
     processedCount++;
   }
 
-  await browser.close();
   return { processedCount, totalChecked: targetList.length };
 }
