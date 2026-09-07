@@ -1,17 +1,11 @@
-import { XMLParser } from "fast-xml-parser";
 import he from "he";
 import { prisma } from "./db";
 import { detectCompetition } from "./leagues";
 
-const parser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: "@_",
-});
-
-const SUBREDDIT_POSTS_RSS = "https://www.reddit.com/r/footballhighlights/new.rss";
+const SUBREDDIT_JSON = "https://www.reddit.com/r/footballhighlights/new.json?limit=15";
 const REDDIT_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "application/json, text/xml, */*",
+  "User-Agent": "android:com.footballtv.app:v1.0.0 (by /u/footballhighlights_tv)",
+  "Accept": "application/json",
 };
 
 function cleanTitle(rawTitle: string) {
@@ -94,54 +88,48 @@ function extractAllUrls(rawText: string): { url: string; domain: string; display
 }
 
 export async function syncRedditHighlights() {
-  // 1. Fetch recent match entries from RSS feed
-  const postsRes = await fetch(SUBREDDIT_POSTS_RSS, { headers: REDDIT_HEADERS, cache: "no-store" });
-  if (!postsRes.ok) throw new Error(`Posts RSS returned ${postsRes.status}`);
+  const res = await fetch(SUBREDDIT_JSON, { headers: REDDIT_HEADERS, cache: "no-store" });
+  if (!res.ok) throw new Error(`Reddit JSON returned ${res.status}`);
 
-  const postsXml = await postsRes.text();
-  const postsObj = parser.parse(postsXml);
-  const postEntries = postsObj?.feed?.entry || [];
-  const postList = Array.isArray(postEntries) ? postEntries : [postEntries];
+  const data = await res.json();
+  const children = data?.data?.children || [];
 
   let processedCount = 0;
-  const targetList = postList.slice(0, 15);
 
-  for (const item of targetList) {
-    if (!item.id || !item.title) continue;
+  for (const child of children) {
+    const post = child.data;
+    if (!post || !post.id || !post.title) continue;
 
-    const redditId = String(item.id);
-    const redditTitle = typeof item.title === "string" ? item.title : item.title["#text"] || "";
-    const permalink = item.link?.["@_href"] || "";
-    const publishedAt = item.published ? new Date(item.published) : new Date();
-    const contentHtml = item.content?.["#text"] || item.content || "";
+    const redditId = post.name || `t3_${post.id}`;
+    const redditTitle = post.title;
+    const permalink = post.permalink ? `https://www.reddit.com${post.permalink}` : "";
+    const publishedAt = new Date(post.created_utc * 1000);
+    const selftext = post.selftext || "";
 
     const { title, homeTeam, awayTeam, competition } = cleanTitle(redditTitle);
 
-    // Initial links from post selftext
-    const foundLinks = extractAllUrls(contentHtml);
+    // Links from post selftext
+    const foundLinks = extractAllUrls(selftext);
 
-    // Fetch comments via Reddit JSON API instead of headless browser
+    // Fetch comments via thread JSON
     if (permalink) {
       try {
-        const jsonUrl = permalink.replace(/\/$/, "") + ".json";
+        const jsonUrl = `https://www.reddit.com${post.permalink.replace(/\/$/, "")}.json`;
         const threadRes = await fetch(jsonUrl, { headers: REDDIT_HEADERS, cache: "no-store" });
         if (threadRes.ok) {
           const threadData = await threadRes.json();
-          // threadData[1] contains the comment tree
           const comments = threadData[1]?.data?.children || [];
           for (const c of comments) {
-            const bodyHtml = c.data?.body_html || "";
             const body = c.data?.body || "";
-            if (bodyHtml) foundLinks.push(...extractAllUrls(bodyHtml));
             if (body) foundLinks.push(...extractAllUrls(body));
           }
         }
       } catch (err) {
-        console.warn(`Failed to fetch comments JSON for ${permalink}:`, err);
+        console.warn(`Comment fetch failed for ${redditId}:`, err);
       }
     }
 
-    // Deduplicate links
+    // Deduplicate
     const uniqueMap = new Map<string, (typeof foundLinks)[0]>();
     for (const link of foundLinks) {
       if (!uniqueMap.has(link.url)) {
@@ -177,7 +165,7 @@ export async function syncRedditHighlights() {
           awayTeam,
           competition,
           permalink,
-          selftextRaw: contentHtml,
+          selftextRaw: selftext,
           publishedAt,
           links: {
             create: finalLinks,
@@ -189,5 +177,5 @@ export async function syncRedditHighlights() {
     processedCount++;
   }
 
-  return { processedCount, totalChecked: targetList.length };
+  return { processedCount, totalChecked: children.length };
 }
