@@ -23,24 +23,24 @@ interface MatchPost {
 }
 
 const CATEGORIES = [
-  "All Matches",
+  "All",
   "Premier League",
-  "Champions League",
+  "UCL",
   "La Liga",
   "Serie A",
   "Bundesliga",
-  "Other Football",
+  "Other",
 ];
 
 function matchesCategory(competition: string | null | undefined, selected: string): boolean {
-  if (selected === "All Matches") return true;
+  if (selected === "All") return true;
   const comp = (competition || "").toLowerCase();
   const target = selected.toLowerCase();
 
   if (target === "premier league") {
     return comp.includes("premier") || comp.includes("epl");
   }
-  if (target === "champions league") {
+  if (target === "ucl") {
     return comp.includes("champions") || comp.includes("ucl");
   }
   if (target === "la liga") {
@@ -52,7 +52,7 @@ function matchesCategory(competition: string | null | undefined, selected: strin
   if (target === "bundesliga") {
     return comp.includes("bundesliga");
   }
-  if (target === "other football") {
+  if (target === "other") {
     return !["premier", "epl", "champions", "ucl", "la liga", "laliga", "serie", "bundesliga"].some((k) =>
       comp.includes(k)
     );
@@ -87,11 +87,7 @@ export default function TVDashboard() {
     }
   }, []);
 
-  useEffect(() => {
-    fetchMatches();
-  }, [fetchMatches]);
-
-  const handleSync = async () => {
+  const handleSync = useCallback(async () => {
     if (syncing) return;
     setSyncing(true);
     try {
@@ -102,9 +98,18 @@ export default function TVDashboard() {
     } finally {
       setSyncing(false);
     }
-  };
+  }, [syncing, fetchMatches]);
 
-  const selectedCategory = CATEGORIES[categoryIndex] || "All Matches";
+  // Initial load: Fetch fixtures + trigger background auto-sync so TV always has latest data
+  useEffect(() => {
+    fetchMatches();
+    // Auto-sync in background on open
+    fetch("/api/sync", { cache: "no-store" })
+      .then(() => fetchMatches())
+      .catch(() => {});
+  }, [fetchMatches]);
+
+  const selectedCategory = CATEGORIES[categoryIndex] || "All";
   const filteredMatches = matches.filter((m) => matchesCategory(m.competition, selectedCategory));
 
   // Focus and scroll categories / sync button
@@ -148,7 +153,7 @@ export default function TVDashboard() {
   // Unified Remote D-Pad Navigation Controller
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // 1. In Drawer Mode (Selecting Streams / Mirrors)
+      // 1. In Drawer Mode
       if (activeZone === "drawer") {
         const totalLinks = activeMatch?.links?.length || 0;
         if (e.key === "ArrowDown" || e.key === "s") {
@@ -168,9 +173,9 @@ export default function TVDashboard() {
         return;
       }
 
-      // 2. In Category Bar Mode (Filtering Leagues & Sync Button)
+      // 2. In Category / Action Bar Mode
       if (activeZone === "categories") {
-        const maxIndex = CATEGORIES.length; // index CATEGORIES.length is Sync
+        const maxIndex = CATEGORIES.length; // CATEGORIES.length = "Sync" button
         if (e.key === "ArrowRight" || e.key === "d") {
           e.preventDefault();
           setCategoryIndex((prev) => Math.min(prev + 1, maxIndex));
@@ -191,7 +196,7 @@ export default function TVDashboard() {
         return;
       }
 
-      // 3. In Match List Mode (Browsing Fixtures)
+      // 3. In Match List Mode
       if (activeZone === "matches") {
         if (e.key === "ArrowDown" || e.key === "s") {
           e.preventDefault();
@@ -217,20 +222,19 @@ export default function TVDashboard() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeZone, categoryIndex, focusedIndex, focusedLinkIndex, filteredMatches, activeMatch, syncing]);
+  }, [activeZone, categoryIndex, focusedIndex, focusedLinkIndex, filteredMatches, activeMatch, syncing, handleSync]);
 
   return (
-    <main className="h-screen w-screen bg-neutral-950 text-neutral-100 flex flex-col p-8 select-none overflow-hidden font-sans">
-      {/* Top Header & Category Filter Bar */}
-      <header className="mb-6 flex items-center justify-between flex-shrink-0">
-        <div>
-          <h1 className="text-2xl font-black tracking-tight text-white flex items-center gap-2">
-            <span className="h-3 w-3 rounded-full bg-emerald-500 animate-pulse" />
-            FOOTBALL TV
-          </h1>
-          <p className="text-xs text-neutral-400 font-medium">Replay & Highlight Streamer</p>
+    <main className="h-screen w-screen bg-neutral-950 text-neutral-100 flex flex-col p-6 select-none overflow-hidden font-sans">
+      {/* Top Header & Navigation Bar */}
+      <header className="mb-4 flex items-center justify-between flex-shrink-0">
+        <div className="flex items-center gap-3">
+          <span className="h-3.5 w-3.5 rounded-full bg-emerald-500 animate-pulse" />
+          <h1 className="text-xl font-black tracking-tight text-white">FOOTBALL TV</h1>
         </div>
-        <div className="flex gap-2 items-center">
+
+        {/* Categories + Sync Button */}
+        <div className="flex items-center gap-2">
           {CATEGORIES.map((cat, idx) => {
             const isCatActive = categoryIndex === idx;
             const isCatFocused = activeZone === "categories" && isCatActive;
@@ -245,7 +249,7 @@ export default function TVDashboard() {
                   setFocusedIndex(0);
                   setActiveZone("matches");
                 }}
-                className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all outline-none ${
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all outline-none ${
                   isCatFocused
                     ? "bg-emerald-400 text-black ring-2 ring-white scale-105"
                     : isCatActive
@@ -258,15 +262,15 @@ export default function TVDashboard() {
             );
           })}
 
-          {/* Dedicated In-App Refresh / Sync Button */}
+          {/* Prominent Dedicated Refresh Button */}
           <button
             ref={syncBtnRef}
             onClick={handleSync}
             disabled={syncing}
-            className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all outline-none flex items-center gap-1.5 ${
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all outline-none flex items-center gap-1.5 ${
               activeZone === "categories" && categoryIndex === CATEGORIES.length
-                ? "bg-blue-500 text-white ring-2 ring-white scale-105"
-                : "bg-neutral-900 text-neutral-300 border border-neutral-700 hover:text-white"
+                ? "bg-amber-400 text-black ring-2 ring-white scale-105"
+                : "bg-neutral-800 text-amber-300 border border-neutral-700 hover:bg-neutral-700"
             } ${syncing ? "opacity-60 cursor-not-allowed" : ""}`}
           >
             <span className={syncing ? "animate-spin inline-block" : ""}>🔄</span>
@@ -278,7 +282,7 @@ export default function TVDashboard() {
       {/* Main Grid View */}
       <div className="flex-1 flex gap-6 min-h-0 overflow-hidden">
         {/* Match Feed */}
-        <div className="flex-1 overflow-y-auto pr-2 space-y-3 h-full">
+        <div className="flex-1 overflow-y-auto pr-2 space-y-2.5 h-full">
           {loading ? (
             <div className="flex h-64 items-center justify-center text-neutral-600 text-sm">
               Loading fixtures...
@@ -302,21 +306,21 @@ export default function TVDashboard() {
                     setFocusedLinkIndex(0);
                     setActiveZone("drawer");
                   }}
-                  className={`p-5 rounded-xl border transition-all duration-150 flex items-center justify-between cursor-pointer outline-none ${
+                  className={`p-4 rounded-xl border transition-all duration-150 flex items-center justify-between cursor-pointer outline-none ${
                     isSelected
                       ? "bg-neutral-900 border-emerald-400 ring-2 ring-emerald-400/40"
                       : isFocused
                       ? "bg-emerald-950/40 border-emerald-400 shadow-xl shadow-emerald-900/40 translate-x-2"
-                      : "bg-neutral-900 border-neutral-800 hover:border-neutral-700 opacity-80"
+                      : "bg-neutral-900 border-neutral-800 hover:border-neutral-700 opacity-85"
                   }`}
                 >
                   <div>
                     <span className="inline-block text-[11px] font-bold px-2 py-0.5 rounded bg-neutral-800 text-emerald-400 mb-1">
                       {match.competition || "Match"}
                     </span>
-                    <h2 className="text-xl font-bold">{match.cleanedTitle}</h2>
+                    <h2 className="text-lg font-bold text-white">{match.cleanedTitle}</h2>
                   </div>
-                  <div className="text-xs font-semibold px-3 py-1 rounded bg-neutral-800 text-neutral-300">
+                  <div className="text-xs font-semibold px-2.5 py-1 rounded bg-neutral-800 text-neutral-300">
                     {match.links.length} {match.links.length === 1 ? "source" : "sources"}
                   </div>
                 </div>
@@ -326,17 +330,17 @@ export default function TVDashboard() {
         </div>
 
         {/* Selected Match Drawer / Mirror Sources */}
-        <div className="w-96 bg-neutral-900 border border-neutral-800 rounded-2xl p-6 flex flex-col justify-between h-full min-h-0 overflow-hidden flex-shrink-0">
+        <div className="w-80 bg-neutral-900 border border-neutral-800 rounded-2xl p-5 flex flex-col justify-between h-full min-h-0 overflow-hidden flex-shrink-0">
           {activeMatch ? (
             <div className="flex-1 flex flex-col min-h-0">
               <div className="mb-4 flex-shrink-0">
                 <span className="text-xs font-bold text-emerald-400 uppercase">{activeMatch.competition}</span>
-                <h3 className="text-xl font-bold mt-1 leading-snug">{activeMatch.cleanedTitle}</h3>
+                <h3 className="text-lg font-bold mt-1 leading-snug">{activeMatch.cleanedTitle}</h3>
               </div>
 
-              <div className="border-t border-neutral-800 pt-4 flex-1 flex flex-col min-h-0">
+              <div className="border-t border-neutral-800 pt-3 flex-1 flex flex-col min-h-0">
                 <p className="text-xs font-bold text-neutral-400 uppercase tracking-wider mb-2 flex-shrink-0">
-                  Available Streams & Mirrors
+                  Streams & Highlights
                 </p>
                 <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-0">
                   {activeMatch.links.map((link, idx) => {
