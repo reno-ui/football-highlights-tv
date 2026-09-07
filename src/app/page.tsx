@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 
 interface LinkItem {
   id: string;
@@ -29,7 +29,7 @@ const CATEGORIES = [
   "La Liga",
   "Serie A",
   "Bundesliga",
-  "Other Football"
+  "Other Football",
 ];
 
 function matchesCategory(competition: string | null | undefined, selected: string): boolean {
@@ -63,36 +63,62 @@ function matchesCategory(competition: string | null | undefined, selected: strin
 export default function TVDashboard() {
   const [matches, setMatches] = useState<MatchPost[]>([]);
   const [activeZone, setActiveZone] = useState<"categories" | "matches" | "drawer">("matches");
-  const [categoryIndex, setCategoryIndex] = useState(0);
+  const [categoryIndex, setCategoryIndex] = useState(0); // CATEGORIES.length = "Sync" button
   const [focusedIndex, setFocusedIndex] = useState(0);
   const [activeMatch, setActiveMatch] = useState<MatchPost | null>(null);
   const [focusedLinkIndex, setFocusedLinkIndex] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
 
   const cardRefs = useRef<(HTMLDivElement | null)[]>([]);
   const linkRefs = useRef<(HTMLAnchorElement | null)[]>([]);
   const catRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const syncBtnRef = useRef<HTMLButtonElement | null>(null);
 
-  useEffect(() => {
-    fetch("/api/matches")
-      .then((res) => res.json())
-      .then((data) => {
-        setMatches(Array.isArray(data) ? data : data?.matches || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+  const fetchMatches = useCallback(async () => {
+    try {
+      const res = await fetch("/api/matches", { cache: "no-store" });
+      const data = await res.json();
+      setMatches(Array.isArray(data) ? data : data?.matches || []);
+    } catch {
+      // Ignore network errors
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const selectedCategory = CATEGORIES[categoryIndex];
+  useEffect(() => {
+    fetchMatches();
+  }, [fetchMatches]);
+
+  const handleSync = async () => {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      await fetch("/api/sync", { cache: "no-store" });
+      await fetchMatches();
+    } catch (err) {
+      console.error("Sync failed:", err);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const selectedCategory = CATEGORIES[categoryIndex] || "All Matches";
   const filteredMatches = matches.filter((m) => matchesCategory(m.competition, selectedCategory));
 
-  // Focus and scroll categories
+  // Focus and scroll categories / sync button
   useEffect(() => {
     if (activeZone === "categories") {
-      const btn = catRefs.current[categoryIndex];
-      if (btn) {
-        btn.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
-        btn.focus();
+      if (categoryIndex === CATEGORIES.length) {
+        syncBtnRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+        syncBtnRef.current?.focus();
+      } else {
+        const btn = catRefs.current[categoryIndex];
+        if (btn) {
+          btn.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+          btn.focus();
+        }
       }
     }
   }, [categoryIndex, activeZone]);
@@ -142,25 +168,25 @@ export default function TVDashboard() {
         return;
       }
 
-      // 2. In Category Bar Mode (Filtering Leagues)
+      // 2. In Category Bar Mode (Filtering Leagues & Sync Button)
       if (activeZone === "categories") {
+        const maxIndex = CATEGORIES.length; // index CATEGORIES.length is Sync
         if (e.key === "ArrowRight" || e.key === "d") {
           e.preventDefault();
-          setCategoryIndex((prev) => {
-            const next = Math.min(prev + 1, CATEGORIES.length - 1);
-            setFocusedIndex(0);
-            return next;
-          });
+          setCategoryIndex((prev) => Math.min(prev + 1, maxIndex));
+          setFocusedIndex(0);
         } else if (e.key === "ArrowLeft" || e.key === "a") {
           e.preventDefault();
-          setCategoryIndex((prev) => {
-            const next = Math.max(prev - 1, 0);
-            setFocusedIndex(0);
-            return next;
-          });
+          setCategoryIndex((prev) => Math.max(prev - 1, 0));
+          setFocusedIndex(0);
         } else if (e.key === "ArrowDown" || e.key === "s") {
           e.preventDefault();
           setActiveZone("matches");
+        } else if (e.key === "Enter") {
+          if (categoryIndex === CATEGORIES.length) {
+            e.preventDefault();
+            handleSync();
+          }
         }
         return;
       }
@@ -171,10 +197,11 @@ export default function TVDashboard() {
           e.preventDefault();
           setFocusedIndex((prev) => Math.min(prev + 1, filteredMatches.length - 1));
         } else if (e.key === "ArrowUp" || e.key === "w") {
-          e.preventDefault();
           if (focusedIndex === 0) {
+            e.preventDefault();
             setActiveZone("categories");
           } else {
+            e.preventDefault();
             setFocusedIndex((prev) => Math.max(prev - 1, 0));
           }
         } else if (e.key === "Enter" || e.key === "ArrowRight") {
@@ -190,7 +217,7 @@ export default function TVDashboard() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeZone, categoryIndex, focusedIndex, focusedLinkIndex, filteredMatches, activeMatch]);
+  }, [activeZone, categoryIndex, focusedIndex, focusedLinkIndex, filteredMatches, activeMatch, syncing]);
 
   return (
     <main className="h-screen w-screen bg-neutral-950 text-neutral-100 flex flex-col p-8 select-none overflow-hidden font-sans">
@@ -203,14 +230,16 @@ export default function TVDashboard() {
           </h1>
           <p className="text-xs text-neutral-400 font-medium">Replay & Highlight Streamer</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
           {CATEGORIES.map((cat, idx) => {
             const isCatActive = categoryIndex === idx;
             const isCatFocused = activeZone === "categories" && isCatActive;
             return (
               <button
                 key={cat}
-                ref={(el) => { catRefs.current[idx] = el; }}
+                ref={(el) => {
+                  catRefs.current[idx] = el;
+                }}
                 onClick={() => {
                   setCategoryIndex(idx);
                   setFocusedIndex(0);
@@ -228,15 +257,30 @@ export default function TVDashboard() {
               </button>
             );
           })}
+
+          {/* Dedicated In-App Refresh / Sync Button */}
+          <button
+            ref={syncBtnRef}
+            onClick={handleSync}
+            disabled={syncing}
+            className={`px-4 py-1.5 rounded-full text-xs font-semibold transition-all outline-none flex items-center gap-1.5 ${
+              activeZone === "categories" && categoryIndex === CATEGORIES.length
+                ? "bg-blue-500 text-white ring-2 ring-white scale-105"
+                : "bg-neutral-900 text-neutral-300 border border-neutral-700 hover:text-white"
+            } ${syncing ? "opacity-60 cursor-not-allowed" : ""}`}
+          >
+            <span className={syncing ? "animate-spin inline-block" : ""}>🔄</span>
+            {syncing ? "Syncing..." : "Sync"}
+          </button>
         </div>
       </header>
 
       {/* Main Grid View */}
-      <div className="flex-1 flex gap-8 min-h-0 overflow-hidden">
+      <div className="flex-1 flex gap-6 min-h-0 overflow-hidden">
         {/* Match Feed */}
         <div className="flex-1 overflow-y-auto pr-2 space-y-3 h-full">
           {loading ? (
-            <div className="flex h-64 items-center justify-center text-neutral-500 text-sm">
+            <div className="flex h-64 items-center justify-center text-neutral-600 text-sm">
               Loading fixtures...
             </div>
           ) : filteredMatches.length === 0 ? (
@@ -248,7 +292,9 @@ export default function TVDashboard() {
               return (
                 <div
                   key={match.id}
-                  ref={(el) => { cardRefs.current[idx] = el; }}
+                  ref={(el) => {
+                    cardRefs.current[idx] = el;
+                  }}
                   tabIndex={0}
                   onClick={() => {
                     setFocusedIndex(idx);
@@ -256,9 +302,9 @@ export default function TVDashboard() {
                     setFocusedLinkIndex(0);
                     setActiveZone("drawer");
                   }}
-                  className={`p-6 rounded-xl border transition-all duration-150 flex items-center justify-between cursor-pointer outline-none ${
+                  className={`p-5 rounded-xl border transition-all duration-150 flex items-center justify-between cursor-pointer outline-none ${
                     isSelected
-                      ? "bg-neutral-900 border-emerald-500 ring-2 ring-emerald-500/40"
+                      ? "bg-neutral-900 border-emerald-400 ring-2 ring-emerald-400/40"
                       : isFocused
                       ? "bg-emerald-950/40 border-emerald-400 shadow-xl shadow-emerald-900/40 translate-x-2"
                       : "bg-neutral-900 border-neutral-800 hover:border-neutral-700 opacity-80"
@@ -270,7 +316,7 @@ export default function TVDashboard() {
                     </span>
                     <h2 className="text-xl font-bold">{match.cleanedTitle}</h2>
                   </div>
-                  <div className="text-sm font-semibold px-3 py-1 rounded bg-neutral-800 text-neutral-300">
+                  <div className="text-xs font-semibold px-3 py-1 rounded bg-neutral-800 text-neutral-300">
                     {match.links.length} {match.links.length === 1 ? "source" : "sources"}
                   </div>
                 </div>
@@ -289,7 +335,7 @@ export default function TVDashboard() {
               </div>
 
               <div className="border-t border-neutral-800 pt-4 flex-1 flex flex-col min-h-0">
-                <p className="text-xs font-bold text-neutral-400 uppercase tracking-wider mb-3 flex-shrink-0">
+                <p className="text-xs font-bold text-neutral-400 uppercase tracking-wider mb-2 flex-shrink-0">
                   Available Streams & Mirrors
                 </p>
                 <div className="flex-1 overflow-y-auto space-y-2 pr-1 min-h-0">
@@ -298,14 +344,16 @@ export default function TVDashboard() {
                     return (
                       <a
                         key={link.id}
-                        ref={(el) => { linkRefs.current[idx] = el; }}
+                        ref={(el) => {
+                          linkRefs.current[idx] = el;
+                        }}
                         href={link.url}
                         target="_blank"
                         rel="noreferrer"
                         tabIndex={0}
                         className={`block p-3 rounded-lg transition-all font-semibold text-sm border outline-none ${
                           isLinkFocused
-                            ? "bg-emerald-500 text-black border-emerald-400 scale-[1.02] shadow-lg shadow-emerald-500/20"
+                            ? "bg-emerald-500 text-black border-emerald-400 scale-[1.02] shadow-lg shadow-emerald-500/30"
                             : "bg-neutral-800 text-neutral-200 border-neutral-700 hover:bg-neutral-700"
                         }`}
                       >
