@@ -1,13 +1,12 @@
+import { XMLParser } from "fast-xml-parser";
 import he from "he";
 import { prisma } from "./db";
 import { detectCompetition } from "./leagues";
 
-const SUBREDDIT_JSON = "https://old.reddit.com/r/footballhighlights/new.json?limit=25";
+const RSS_URL = "https://www.reddit.com/r/footballhighlights/new/.rss";
 const REDDIT_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Cache-Control": "no-cache",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
 
 function cleanTitle(rawTitle: string) {
@@ -50,134 +49,137 @@ function extractAllUrls(rawText: string): { url: string; domain: string; display
   if (!rawText) return [];
 
   const decoded = he.decode(rawText);
-  const urlRegex = /(?:href=["'])?(https?:\/\/[^\s"'<>]+)/gi;
   const results: { url: string; domain: string; displayName: string; category: string }[] = [];
+  const seen = new Set<string>();
 
-  let match: RegExpExecArray | null;
-  while ((match = urlRegex.exec(decoded)) !== null) {
-    let rawUrl = match[1];
-    rawUrl = rawUrl.replace(/[.,;:]+$/, "");
+  // Extract from HTML anchor tags: <a href="url">text</a>
+  const anchorRegex = /<a\s+[^>]*href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gi;
+  let match;
+  while ((match = anchorRegex.exec(decoded)) !== null) {
+    const url = match[1].trim();
+    const anchorText = match[2].replace(/<[^>]+>/g, "").trim();
 
-    if (
-      rawUrl.includes("reddit.com") ||
-      rawUrl.includes("redd.it") ||
-      rawUrl.includes("preview.redd.it") ||
-      rawUrl.includes("styles.redditmedia.com") ||
-      rawUrl.includes("w3.org")
-    ) {
+    if (!url.startsWith("http")) continue;
+    if (url.includes("reddit.com") || url.includes("redd.it")) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+
+    let domain = "";
+    try {
+      domain = new URL(url).hostname.replace("www.", "");
+    } catch {
       continue;
     }
 
-    try {
-      const parsed = new URL(rawUrl);
-      const domain = parsed.hostname.replace(/^www\./, "");
-      const index = match.index;
-      const context = decoded.slice(Math.max(0, index - 80), Math.min(decoded.length, index + 80));
-      const category = categorizeLink(context);
+    const category = categorizeLink(anchorText + " " + decoded.substring(Math.max(0, match.index - 50), match.index));
+    results.push({
+      url,
+      domain,
+      displayName: anchorText || domain,
+      category,
+    });
+  }
 
-      results.push({
-        url: rawUrl,
-        domain,
-        displayName: domain,
-        category,
-      });
+  // Fallback for raw URLs
+  const urlRegex = /(https?:\/\/[^\s<>"']+)/gi;
+  while ((match = urlRegex.exec(decoded)) !== null) {
+    const url = match[1].trim();
+    if (url.includes("reddit.com") || url.includes("redd.it")) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+
+    let domain = "";
+    try {
+      domain = new URL(url).hostname.replace("www.", "");
     } catch {
-      // Ignore invalid URLs
+      continue;
     }
+
+    const context = decoded.substring(Math.max(0, match.index - 40), match.index + url.length + 40);
+    results.push({
+      url,
+      domain,
+      displayName: domain,
+      category: categorizeLink(context),
+    });
   }
 
   return results;
 }
 
 export async function syncRedditHighlights() {
-  const res = await fetch(SUBREDDIT_JSON, { headers: REDDIT_HEADERS, cache: "no-store" });
-  if (!res.ok) throw new Error(`Reddit JSON returned ${res.status}`);
+  const res = await fetch(RSS_URL, {
+    headers: REDDIT_HEADERS,
+    cache: "no-store",
+  });
 
-  const data = await res.json();
-  const children = data?.data?.children || [];
-
-  let processedCount = 0;
-
-  for (const child of children) {
-    const post = child.data;
-    if (!post || !post.id || !post.title) continue;
-
-    const redditId = post.name || `t3_${post.id}`;
-    const redditTitle = post.title;
-    const permalink = post.permalink ? `https://www.reddit.com${post.permalink}` : "";
-    const publishedAt = new Date(post.created_utc * 1000);
-    const selftext = post.selftext || "";
-
-    const { title, homeTeam, awayTeam, competition } = cleanTitle(redditTitle);
-
-    // Links from post selftext
-    const foundLinks = extractAllUrls(selftext);
-
-    // Fetch comments via thread JSON
-    if (permalink) {
-      try {
-        const jsonUrl = `https://www.reddit.com${post.permalink.replace(/\/$/, "")}.json`;
-        const threadRes = await fetch(jsonUrl, { headers: REDDIT_HEADERS, cache: "no-store" });
-        if (threadRes.ok) {
-          const threadData = await threadRes.json();
-          const comments = threadData[1]?.data?.children || [];
-          for (const c of comments) {
-            const body = c.data?.body || "";
-            if (body) foundLinks.push(...extractAllUrls(body));
-          }
-        }
-      } catch (err) {
-        console.warn(`Comment fetch failed for ${redditId}:`, err);
-      }
-    }
-
-    // Deduplicate
-    const uniqueMap = new Map<string, (typeof foundLinks)[0]>();
-    for (const link of foundLinks) {
-      if (!uniqueMap.has(link.url)) {
-        uniqueMap.set(link.url, link);
-      }
-    }
-    const finalLinks = Array.from(uniqueMap.values());
-
-    const existing = await prisma.matchPost.findUnique({
-      where: { redditId },
-      include: { links: true },
-    });
-
-    if (existing) {
-      await prisma.matchPost.update({
-        where: { id: existing.id },
-        data: {
-          cleanedTitle: title,
-          competition,
-          links: {
-            deleteMany: {},
-            create: finalLinks,
-          },
-        },
-      });
-    } else {
-      await prisma.matchPost.create({
-        data: {
-          redditId,
-          redditTitle,
-          cleanedTitle: title,
-          homeTeam,
-          awayTeam,
-          competition,
-          permalink,
-          selftextRaw: selftext,
-          publishedAt,
-          links: {
-            create: finalLinks,
-          },
-        },
-      });
-    }
-
-    processedCount++;
+  if (!res.ok) {
+    throw new Error(`Reddit RSS returned status ${res.status}`);
   }
 
-  return { processedCount, totalChecked: children.length };
+  const xmlData = await res.text();
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: "@_",
+  });
+  const parsed = parser.parse(xmlData);
+
+  const entries = parsed?.feed?.entry;
+  if (!entries || !Array.isArray(entries)) {
+    return { syncedCount: 0, message: "No entries found in RSS feed" };
+  }
+
+  let count = 0;
+
+  for (const entry of entries) {
+    const redditId = entry.id || "";
+    const rawTitle = entry.title || "";
+    const rawContent = typeof entry.content === "object" ? entry.content["#text"] : entry.content || "";
+    const permalink = Array.isArray(entry.link) ? entry.link[0]?.["@_href"] : entry.link?.["@_href"] || "";
+
+    if (!redditId || !rawTitle) continue;
+    if (rawTitle.toLowerCase().startsWith("request")) continue; // Skip request posts
+
+    const { title: cleanedTitle, homeTeam, awayTeam, competition } = cleanTitle(rawTitle);
+    const links = extractAllUrls(rawContent);
+
+    const post = await prisma.matchPost.upsert({
+      where: { redditId },
+      create: {
+        redditId,
+        redditTitle: rawTitle,
+        cleanedTitle,
+        homeTeam,
+        awayTeam,
+        competition: competition || "Other",
+        permalink,
+      },
+      update: {
+        cleanedTitle,
+        homeTeam,
+        awayTeam,
+        competition: competition || "Other",
+        permalink,
+      },
+    });
+
+    // Delete existing links and recreate
+    await prisma.linkItem.deleteMany({ where: { matchPostId: post.id } });
+
+    for (const link of links) {
+      await prisma.linkItem.create({
+        data: {
+          url: link.url,
+          domain: link.domain,
+          displayName: link.displayName,
+          category: link.category,
+          matchPostId: post.id,
+        },
+      });
+    }
+
+    count++;
+  }
+
+  return { syncedCount: count };
 }
